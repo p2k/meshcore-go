@@ -193,8 +193,9 @@ which we may not do today. Low priority.
 - **`radio.fem.rxgain` / `radio.fem.txgain` CLI keys and the `MeshCore.h` FEM virtuals.**
   Hardware PA/LNA control; N/A for a transport-attached node. The v1.17.1 patch even
   comments out their load/save until they can be set.
-- **`cad` CLI key, `getCADEnabled()`.** Radio hardware; N/A. Still part of the broader
-  "no airtime/duty-cycle/CSMA anywhere" systemic gap already in `FEATURE_PARITY.md`.
+- **`cad` CLI key, `getCADEnabled()`.** Radio hardware; N/A for a transport-attached
+  node. With the PHY transport (2026-10-18), CAD is one of the remaining RF gaps listed
+  in `FEATURE_PARITY.md`.
 - **MCU temperature in telemetry.** Firmware now adds `board.getMCUTemperature()` to
   self-telemetry. Our `telemetry.Provider` is pluggable and the host app populates it,
   so this is an app-level choice, not a library gap.

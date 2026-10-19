@@ -67,6 +67,10 @@ type Identity struct {
 	RadioSF      uint8
 	RadioCR      uint8
 
+	// AirtimeFactor is reported in GET_TUNING_PARAMS, e.g. 1.0 (the firmware
+	// default) for a 50% duty cycle. Leave it 0 on a node without radio.
+	AirtimeFactor float64
+
 	FirmwareVerCode  uint8  // protocol/firmware version code; default 13 (v1.16.0)
 	FirmwareVersion  string // default "v1.16.0"
 	BuildDate        string // firmware build date; default "6 Jun 2026"
@@ -126,6 +130,31 @@ type Config struct {
 	// TRACE_DATA. Without it, CMD_SEND_TRACE_PATH returns an error.
 	SendTrace func(ctx context.Context, tag, authCode uint32, flags uint8, path []byte) error
 
+	// OnRadioParams, if set, applies radio parameters changed by the app with
+	// CMD_SET_RADIO_PARAMS: frequency in kHz, bandwidth in Hz, spreading factor
+	// and coding rate (5-8). An error rejects the change. Without it, the
+	// parameters are only stored and reported back, fine for a node without
+	// radio. For a phy transport:
+	//
+	//	func(freqKHz, bwHz uint32, sf, cr uint8) error {
+	//		p := tr.RadioParams()
+	//		p.Frequency, p.Bandwidth, p.SpreadingFactor, p.CodingRate = freqKHz*1000, bwHz, sf, cr
+	//		return tr.SetRadioParams(p)
+	//	}
+	OnRadioParams func(freqKHz, bwHz uint32, sf, cr uint8) error
+
+	// OnTxPower, if set, applies the TX power in dBm changed by the app with
+	// CMD_SET_RADIO_TX_POWER. An error rejects the change. Without it, the
+	// power is only stored and reported back.
+	OnTxPower func(dBm int8) error
+
+	// OnTuningParams, if set, applies the tuning parameters changed by the app
+	// with CMD_SET_TUNING_PARAMS, both x1000 like on the wire: the RX delay
+	// base and the airtime factor. For a phy transport, the duty cycle is
+	// 1/(1 + airtimeFactor/1000). An error rejects the change. Without it, the
+	// parameters are only stored and reported back.
+	OnTuningParams func(rxDelay, airtimeFactor uint32) error
+
 	// Stats, if set, provides device statistics for GET_STATS (the app polls
 	// this). Without it, GET_STATS still answers with battery and uptime, and
 	// zeroed packet/radio counters.
@@ -174,6 +203,10 @@ type Server struct {
 	exportSelf    func() []byte
 	startTime     time.Time
 	log           *slog.Logger
+
+	onRadioParams  func(freqKHz, bwHz uint32, sf, cr uint8) error
+	onTxPower      func(dBm int8) error
+	onTuningParams func(rxDelay, airtimeFactor uint32) error
 
 	mu       sync.RWMutex   // guards mutable identity fields and the channel table
 	name     string         // current advertised name; SET_ADVERT_NAME updates it
@@ -277,6 +310,11 @@ func NewServer(cfg Config) *Server {
 		sendTrace:     cfg.SendTrace,
 		stats:         cfg.Stats,
 		exportSelf:    cfg.ExportSelf,
+
+		onRadioParams:  cfg.OnRadioParams,
+		onTxPower:      cfg.OnTxPower,
+		onTuningParams: cfg.OnTuningParams,
+
 		startTime:     time.Now(),
 		log:           log.WithGroup("companion"),
 		name:          id.Name,
@@ -286,6 +324,7 @@ func NewServer(cfg Config) *Server {
 		radioSF:       id.RadioSF,
 		radioCR:       id.RadioCR,
 		txPower:       id.TxPower,
+		airtimeFactor: uint32(math.Round(id.AirtimeFactor * 1000)),
 		sessions:      make(map[*session]struct{}),
 	}
 	if cfg.Events != nil {
@@ -1127,6 +1166,12 @@ func (s *Server) setRadioParams(ss *session, payload []byte) error {
 		rp.SF < 5 || rp.SF > 12 || rp.CR < 5 || rp.CR > 8 {
 		return ss.send(serial.EncodeErr(serial.ErrCodeIllegalArg))
 	}
+	if s.onRadioParams != nil {
+		if err := s.onRadioParams(rp.Freq, rp.Bw, rp.SF, rp.CR); err != nil {
+			s.log.Warn("failed to apply radio params", "error", err)
+			return ss.send(serial.EncodeErr(serial.ErrCodeBadState))
+		}
+	}
 	s.mu.Lock()
 	s.radioFreqKHz, s.radioBwHz, s.radioSF, s.radioCR = rp.Freq, rp.Bw, rp.SF, rp.CR
 	s.mu.Unlock()
@@ -1142,6 +1187,12 @@ func (s *Server) setTxPower(ss *session, payload []byte) error {
 	if power < -9 || power > int8(s.id.MaxTxPower) {
 		return ss.send(serial.EncodeErr(serial.ErrCodeIllegalArg))
 	}
+	if s.onTxPower != nil {
+		if err := s.onTxPower(power); err != nil {
+			s.log.Warn("failed to apply tx power", "error", err)
+			return ss.send(serial.EncodeErr(serial.ErrCodeBadState))
+		}
+	}
 	s.mu.Lock()
 	s.txPower = uint8(power)
 	s.mu.Unlock()
@@ -1153,6 +1204,12 @@ func (s *Server) setTuningParams(ss *session, payload []byte) error {
 	rx, af, err := serial.ParseSetTuningParams(payload)
 	if err != nil {
 		return ss.send(serial.EncodeErr(serial.ErrCodeIllegalArg))
+	}
+	if s.onTuningParams != nil {
+		if err := s.onTuningParams(rx, af); err != nil {
+			s.log.Warn("failed to apply tuning params", "error", err)
+			return ss.send(serial.EncodeErr(serial.ErrCodeBadState))
+		}
 	}
 	s.mu.Lock()
 	s.rxDelay, s.airtimeFactor = rx, af

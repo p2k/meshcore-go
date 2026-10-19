@@ -4,11 +4,17 @@
 //
 // With no transport flags it still serves the companion handshake and an empty
 // contact list, which is enough to confirm a client can connect. Point it at a
-// real LoRa radio (-serial) or an MQTT bridge (-mqtt) to put it on the mesh so
-// contacts populate from adverts.
+// real LoRa radio (-serial for a MeshCore device, -phy for a SX1262 attached to
+// this host) or an MQTT bridge (-mqtt) to put it on the mesh so contacts
+// populate from adverts.
 //
 //	go run ./examples/companion -listen 127.0.0.1:5000 -name demo
 //	go run ./examples/companion -serial /dev/ttyUSB0 -name demo
+//	go run ./examples/companion -phy meshstick -freq 915 -bw 250 -sf 11 -cr 5 -name demo
+//
+// With -phy, the radio flags configure the radio and the app can change them,
+// otherwise they are only reported to the app. Pay attention to the
+// regulations of your region, e.g. frequencies, TX power and duty cycle.
 //
 // Then add a MeshCore source in MeshMonitor with connection type TCP, host
 // 127.0.0.1, port 5000.
@@ -22,6 +28,7 @@ import (
 	"flag"
 	"fmt"
 	"log/slog"
+	"math"
 	"os"
 	"os/signal"
 	"strings"
@@ -38,6 +45,7 @@ import (
 	"github.com/kabili207/meshcore-go/device/node"
 	"github.com/kabili207/meshcore-go/transport"
 	mqtttransport "github.com/kabili207/meshcore-go/transport/mqtt"
+	phytransport "github.com/kabili207/meshcore-go/transport/phy"
 	serialtransport "github.com/kabili207/meshcore-go/transport/serial"
 	udptransport "github.com/kabili207/meshcore-go/transport/udp"
 )
@@ -72,10 +80,14 @@ func run() error {
 		udpPort   = flag.Int("udp-port", udptransport.DefaultPort, "UDP multicast port")
 		udpIface  = flag.String("udp-iface", "", "network interface for UDP multicast (optional, e.g. eth0)")
 
-		freq = flag.Float64("freq", 915.0, "radio frequency in MHz (reported to the app)")
-		bw   = flag.Float64("bw", 250, "radio bandwidth in kHz (reported to the app)")
-		sf   = flag.Int("sf", 11, "radio spreading factor (reported to the app)")
-		cr   = flag.Int("cr", 5, "radio coding rate (reported to the app)")
+		phyBoard  = flag.String("phy", "", "SX1262 board attached to this host (optional): meshstick or waveshare-hat")
+		dutyCycle = flag.Float64("duty-cycle", phytransport.DefaultDutyCycle, "maximum fraction of time transmitting with -phy, e.g. 0.1 in the EU 869.4-869.65 MHz band")
+
+		freq    = flag.Float64("freq", 915.0, "radio frequency in MHz")
+		bw      = flag.Float64("bw", 250, "radio bandwidth in kHz")
+		sf      = flag.Int("sf", 11, "radio spreading factor")
+		cr      = flag.Int("cr", 5, "radio coding rate, 5-8 for 4/5-4/8")
+		txPower = flag.Int("tx-power", 22, "radio TX power in dBm")
 	)
 	flag.Parse()
 
@@ -101,7 +113,24 @@ func run() error {
 		mqttFraming = mqtttransport.FramingRaw
 	}
 
-	transports, err := buildTransports(*serialPort, *baud, mqtttransport.Config{
+	var phyTr *phytransport.Transport
+	if *phyBoard != "" {
+		dev, closeRadio, err := openRadio(*phyBoard)
+		if err != nil {
+			slog.Error("Failed to open radio", "error", err)
+			return err
+		}
+		defer closeRadio()
+		phyTr = newPHY(dev, phytransport.RadioParams{
+			Frequency:       uint32(math.Round(*freq * 1e6)),
+			Bandwidth:       uint32(math.Round(*bw * 1e3)),
+			SpreadingFactor: uint8(*sf),
+			CodingRate:      uint8(*cr),
+			TxPower:         int8(*txPower),
+		}, *dutyCycle)
+	}
+
+	transports, err := buildTransports(*serialPort, *baud, phyTr, mqtttransport.Config{
 		Broker:   *mqttBroker,
 		Topic:    *mqttTopic,
 		Framing:  mqttFraming,
@@ -137,10 +166,11 @@ func run() error {
 		}
 	})
 
-	srv := companion.NewServer(companion.Config{
+	srvCfg := companion.Config{
 		Node: comp.Base(),
 		Identity: companion.Identity{
 			Name:         *name,
+			TxPower:      uint8(max(*txPower, 0)),
 			RadioFreqMHz: *freq,
 			RadioBWkHz:   *bw,
 			RadioSF:      uint8(*sf),
@@ -196,7 +226,11 @@ func run() error {
 			}
 		},
 		Logger: slog.Default(),
-	})
+	}
+	if phyTr != nil {
+		wirePHY(&srvCfg, phyTr)
+	}
+	srv := companion.NewServer(srvCfg)
 
 	// Push PUSH_CODE_CONTACT_DELETED when the contact table evicts an entry, so
 	// the app's contact list stays in sync.
@@ -231,11 +265,11 @@ func run() error {
 	}
 }
 
-// buildTransports assembles the mesh transports from the serial/MQTT flags. An
+// buildTransports assembles the mesh transports from the serial/phy/MQTT flags. An
 // empty result is valid: the node then serves the companion protocol without a
-// live mesh connection. mqttCfg is used only when its Broker is set; NodeID and
-// Logger are filled in here.
-func buildTransports(serialPort string, baud int, mqttCfg mqtttransport.Config, udpCfg *udptransport.Config, nodeID string) ([]node.TransportOption, error) {
+// live mesh connection. phyTr is added if not nil. mqttCfg is used only when its
+// Broker is set; NodeID and Logger are filled in here.
+func buildTransports(serialPort string, baud int, phyTr *phytransport.Transport, mqttCfg mqtttransport.Config, udpCfg *udptransport.Config, nodeID string) ([]node.TransportOption, error) {
 	var transports []node.TransportOption
 
 	if serialPort != "" {
@@ -248,6 +282,14 @@ func buildTransports(serialPort string, baud int, mqttCfg mqtttransport.Config, 
 			Transport: st,
 			Source:    transport.PacketSourceSerial,
 			Name:      "serial",
+		})
+	}
+
+	if phyTr != nil {
+		transports = append(transports, node.TransportOption{
+			Transport: phyTr,
+			Source:    transport.PacketSourcePHY,
+			Name:      "phy",
 		})
 	}
 

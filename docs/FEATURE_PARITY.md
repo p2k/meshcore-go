@@ -17,9 +17,11 @@ this file.
 
 Two structural facts shape everything:
 
-1. The Go node is **transport-attached** (MQTT / serial / UDP), not a LoRa radio
-   driver. Radio tuning, TX power, CAD, GPS, display/UI, and sleep have no target in
-   Go. These are **N/A by design**, not gaps.
+1. The Go node is **transport-attached** (MQTT / serial / UDP / PHY). Since
+   2026-10-18 the `transport/phy` transport drives a LoRa radio attached to the host
+   (a SX126x via `periph.io/x/devices/v3/sx126x`), so radio tuning, TX power and the
+   airtime rules now have a target when that transport is used. GPS, display/UI, and
+   sleep remain **N/A by design**, not gaps.
 2. The firmware companion is a **phone bridge**: it exposes a serial/BLE frame
    protocol, and the real chat client is a phone app. Go implements **both** sides —
    `device/node` is the mesh/chat engine, and `device/companion` is a frame-protocol
@@ -47,16 +49,43 @@ append/remove/reverse, region map including the exact `/regions2` binary format,
 transport keys (Go implements the private-region keystore that firmware stubs as a
 hardware TODO), trace forwarding, multipart ACK handling, packet dedup.
 
-**Biggest gap: airtime / duty-cycle / CSMA is entirely missing.** Firmware's
-`Dispatcher` runs a token-bucket airtime budget (~50% duty cycle, 1-hour window),
-defers TX when budget is low, does CAD/channel sensing, applies SNR-weighted RX flood
-delay (better-SNR nodes rebroadcast first), and randomizes flood rebroadcast jitter.
-Go has none of it: the router drains its queue every 10ms
-(`DefaultDrainInterval`) and almost always sends with `delay=0`. The queue does
-support per-packet delay (`device/router/queue.go`) and uses it for
-`PathSendDelay` (300ms on PATH packets), so the mechanism exists and is simply never
-applied to airtime. Excusable for a transport-attached node, but any Go node fronting
-real RF would misbehave (collisions, storms, duty-cycle non-compliance).
+**Airtime / duty-cycle / CSMA: implemented in `transport/phy` (2026-10-18), with
+gaps.** Firmware's `Dispatcher` runs a token-bucket airtime budget (~50% duty cycle,
+1-hour window), defers TX when budget is low, does CAD/channel sensing, applies
+SNR-weighted RX flood delay (better-SNR nodes rebroadcast first), and randomizes flood
+rebroadcast jitter. The router still drains its queue every 10ms
+(`DefaultDrainInterval`) and almost always sends with `delay=0`, which is right for
+MQTT/serial/UDP. The RF rules live in the PHY transport instead, so only the radio is
+paced:
+
+- **Airtime budget:** token bucket over a 1-hour window like `Dispatcher`, starting full
+  and refilled at the duty cycle; TX waits while the budget is below half the airtime
+  of a maximum-size packet. `Config.DutyCycle` is `1/(1+af)`, default 0.5 (firmware
+  af 1.0); `SetDutyCycle` changes it at runtime.
+- **Flood rebroadcast jitter:** random delay up to `5 * tx_delay_factor * airtime` for
+  forwarded floods (hop count > 0), `tx_delay_factor` 0.5 as in firmware
+  (`MyMesh::getRetransmitDelay`). `SendPacket` queues and returns immediately.
+- **Not talking over a reception:** the SX126x driver postpones a transmission while a
+  packet with a valid LoRa header is being received, until it is complete. Implicit
+  headers are not covered.
+- **Radio settings:** preamble per spreading factor like `preambleLengthForSF` (32
+  symbols up to SF8, 16 above), low data rate optimization for symbols of 16 ms or
+  longer, MeshCore's private sync word. `SetRadioParams` reconfigures at runtime,
+  pausing RX/TX meanwhile.
+- **RF to RF repeating:** the router no longer excludes `PacketSourcePHY` when
+  rebroadcasting, so a packet heard on the radio is forwarded on the radio.
+
+Still missing:
+
+- **Direct-forward jitter** (`direct_tx_delay_factor`, firmware default 0.2): the
+  transport cannot tell a forwarded direct packet from an originated one. For the same
+  reason, `SendFloodAsRelay` packets get flood jitter as if they were forwards.
+- **SNR-weighted RX delay** (`calcRxDelay`): not implemented; the companion firmware
+  ships it disabled (`rx_delay_base` 0).
+- **CAD and the RSSI interference threshold** (`int.thresh`), and **noise floor
+  sampling**, so `NoiseFloor` in radio stats stays 0.
+- **Busy-channel cap:** firmware retries every 200ms and gives up waiting after 4s;
+  the driver waits until the packet being received is complete.
 
 **Reply scoping** now matches firmware v1.17: a flooded reply mirrors the request's
 transport scope, falls back to `Config.DefaultReplyScope`, and only goes un-scoped
@@ -74,7 +103,7 @@ The config/admin subset is implemented on both (get/set keys, `get acl`, `setper
 `advert.zerohop`, `neighbors`, `neighbor.remove`, and `discover.neighbors`. The
 remaining firmware commands are hardware/radio (gps, sensor, log, ota, tempradio,
 bridge.*, pwrmgt.*, radio tuning) and stay N/A. `stats-radio` returns `unsupported` in
-both roles.
+both roles, also with a PHY transport, whose `Stats()` the CLI does not read yet.
 
 ---
 
@@ -98,6 +127,9 @@ auto-ACK piggyback and multi-acks.
   (`device/companion/companion.go`). Recurring adverts correctly default to disabled
   to match firmware, so a companion currently has no working way to advertise on
   demand through the frame protocol.
+- `CompanionNode.Run` sends a flood advert on every start, while the companion
+  firmware only advertises when the user asks. Over a PHY transport that is a
+  mesh-wide flood per restart.
 
 ### Frame protocol server (`device/companion`)
 
@@ -130,8 +162,16 @@ limit.
 - `CmdExportPrivateKey` / `CmdImportPrivateKey` — key portability; worth a deliberate
   decision rather than a default, since it moves private keys over the wire
 
-**N/A by design:** BLE transport itself (Go speaks the framing, not GATT), radio/tx/
-tuning/BLE-pin/GPS/buzzer prefs.
+**Radio prefs:** `CmdSetRadioParams`, `CmdSetRadioTxPower`, and `CmdSetTuningParams`
+are stored and reported back. With the optional `Config.OnRadioParams` / `OnTxPower` /
+`OnTuningParams` callbacks they are applied first and rejected if that fails;
+`examples/companion -phy` wires them to a PHY transport (the airtime factor sets its
+duty cycle, the RX delay is ignored) and fills the radio part of `GET_STATS` (last
+RSSI/SNR, TX/RX airtime) from `phy.Stats()`. `Identity.AirtimeFactor` sets what
+`GET_TUNING_PARAMS` reports.
+
+**N/A by design:** BLE transport itself (Go speaks the framing, not GATT),
+BLE-pin/GPS/buzzer prefs.
 
 ---
 
@@ -156,7 +196,11 @@ timestamps, node discovery (`repeater_discover.go`), and rate limiting
 `SetConfig` / `LoadConfig` round-trip node settings, and `ACLPersistence` persists the
 access list. Nothing is persisted unless the host app wires these up.
 
-**Missing:** airtime budget and CSMA backoff (see the shared-layer note).
+**RF:** with a PHY transport the repeater gets the airtime budget, flood rebroadcast
+jitter, and RF to RF forwarding (see the shared-layer note). **Missing:** direct-forward
+jitter, CAD / interference threshold, and radio stats: `stats-radio` stays
+`unsupported` and the radio fields of `GET_STATUS` stay zero, as the repeater has no hook
+yet to feed `phy.Stats()` in.
 
 **Behavioral note:** the Go repeater sends a flood advert on boot
 (`advertSched.SendNow(true)`); firmware sends zero-hop.
@@ -226,5 +270,7 @@ KISS TNC).
   discovery, and opt-in persistence.
 - Room server: functionally close to firmware, on a single dispatch path.
 - Sensor and KISS modem: not started.
-- Systemic: no airtime/duty-cycle/CSMA anywhere. This is the one gap that would matter
-  immediately if a LoRa radio transport were ever added.
+- Radio: a LoRa transport exists (`transport/phy`) with the firmware's airtime budget,
+  flood jitter, and radio settings the companion app can change. Remaining RF gaps:
+  direct-forward jitter, CAD / interference threshold / noise floor, and the flood
+  advert a companion sends on every start.

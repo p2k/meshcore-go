@@ -13,8 +13,9 @@ here.
 
 Effort tags: **S** = a few hours, **M** = a day or two, **L** = multi-day.
 "N/A (radio)" marks firmware features that only make sense on a node driving a LoRa
-radio directly; meshcore-go is transport-attached (MQTT/serial), so these are out of
-scope unless a radio transport is added.
+radio directly. meshcore-go is transport-attached (MQTT/serial/UDP); since 2026-10-18
+the `transport/phy` transport drives a radio attached to the host, so these apply to
+nodes using it (see Phase 5).
 
 ## Phase 1: correctness and interop bugs
 
@@ -139,7 +140,8 @@ Make `CompanionNode` a complete chat client, not just a DM client.
 
 **Phase 2 status:** all six items done. Remaining companion gaps (the serial/BLE
 frame protocol, offline message queue, radio prefs, message-signing) are N/A by design
-for a headless transport-attached node — see `docs/FEATURE_PARITY.md`.
+for a headless transport-attached node — see `docs/FEATURE_PARITY.md`. (2026-10-18:
+radio prefs are now applied through optional callbacks when a PHY transport is used.)
 
 ## Phase 3: repeater control plane
 
@@ -282,6 +284,20 @@ transport is ever added:
    optional channel-activity/airtime method radios can implement. Files:
    `transport/interfaces.go`.
 
+**Phase 5 status** (2026-10-18): done for the airtime budget and flood jitter, in
+`transport/phy` rather than the router send loop. The router sends every packet to all
+transports, and MQTT/UDP must not be paced by RF rules, so pacing belongs to the
+transport that drives the radio. The PHY transport keeps a token-bucket budget over a
+1-hour window like `Dispatcher`, delays forwarded floods by up to
+`5 * tx_delay_factor * airtime`, and queues so `SendPacket` never blocks the router.
+Channel sensing lives in the SX126x driver instead of a `transport.Transport` hook: it
+postpones a transmission while a packet with a valid header is being received. The
+router no longer excludes `PacketSourcePHY` when rebroadcasting, so RF to RF repeating
+works. Left: direct-forward jitter (the transport cannot tell forwards apart; a router
+hint would fix it and stop `SendFloodAsRelay` getting flood jitter), SNR-weighted RX
+delay (disabled by default in the companion firmware), CAD / RSSI interference
+threshold / noise floor, and the firmware's 4s cap on waiting for a busy channel.
+
 ## Phase 6: missing roles
 
 1. **Sensor role.** Firmware's `SensorMesh` is a repeater plus a telemetry/history/
@@ -322,7 +338,7 @@ transport is ever added:
 
 Phase 1 in full first (small, corrects on-air/interop behavior). Then pick the track
 that matches the immediate use case: Phase 2 if the priority is a chat client, Phase 3
-if it is a repeater. Phase 4 pays off once both room and repeater need CLIs. Phases 5
-and 6 are only worth starting when a radio transport or a sensor/modem use case is on
-the table.
+if it is a repeater. Phase 4 pays off once both room and repeater need CLIs. Phase 5's
+remaining items matter for nodes using the PHY transport, mainly repeaters. Phase 6 is
+only worth starting when a sensor/modem use case is on the table.
 </content>

@@ -72,6 +72,8 @@ const (
 	PacketSourceLocal
 	// PacketSourceUDP indicates the packet came from a UDP multicast connection.
 	PacketSourceUDP
+	// PacketSourcePHY indicates the packet came from a physical LoRa chip
+	PacketSourcePHY
 )
 
 func (s PacketSource) String() string {
@@ -84,6 +86,8 @@ func (s PacketSource) String() string {
 		return "local"
 	case PacketSourceUDP:
 		return "udp"
+	case PacketSourcePHY:
+		return "phy"
 	default:
 		return "unknown"
 	}

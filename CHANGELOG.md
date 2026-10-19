@@ -53,6 +53,27 @@ contain breaking changes; those are called out explicitly below.
 
 ### Added
 
+- `transport/phy`: a transport for a LoRa radio attached to the host, e.g. a
+  SX1262 driven by `periph.io/x/devices/v3/sx126x`, with the source
+  `transport.PacketSourcePHY`. `SendPacket` queues the packet and returns
+  immediately. Like the firmware's Dispatcher, the transport keeps a token-bucket
+  airtime budget over a 1-hour window (`DutyCycle`, `DutyCycleWindow`; the
+  firmware's airtime factor is `1/DutyCycle - 1`) and delays forwarded flood
+  packets randomly (`TxDelayFactor`). With `Configure` and `Params` it configures
+  the radio on `Start`; `ConfigureSX126x` does so for a SX126x with MeshCore's
+  fixed settings, using `PreambleLength` (32 symbols up to SF8, like the
+  firmware) and `LowDataRateOptimize`. `SetRadioParams` and `SetDutyCycle`
+  change the settings at runtime, pausing the radio meanwhile. `Stats` reports
+  airtime and the last RSSI/SNR.
+- Companion server radio callbacks: `companion.Config.OnRadioParams`,
+  `OnTxPower`, and `OnTuningParams` apply the settings the app changes (an error
+  rejects the change); without them the settings are only stored and reported as
+  before. `Identity.AirtimeFactor` sets what `GET_TUNING_PARAMS` reports.
+- `examples/companion -phy meshstick|waveshare-hat` runs the companion on a
+  SX1262 attached to the host. `-freq`/`-bw`/`-sf`/`-cr` then configure the
+  radio, and the new `-tx-power` and `-duty-cycle` flags set TX power and duty
+  cycle. The app's radio settings are applied and `GET_STATS` reports radio
+  statistics.
 - Firmware-format `ver`/`version` CLI reply: `cli.FirmwareVersion` (the targeted
   firmware version, e.g. `v1.16.0`) plus `cli.FormatVersion` build the
   `"<version> (Build: <date>)"` string the phone apps parse to gate editing. Both
@@ -88,6 +109,16 @@ contain breaking changes; those are called out explicitly below.
   straight back. Unknown or read-only keys return `cli.ErrUnknownKey`.
 - `codec.EncodeBridgeFrame` / `codec.DecodeBridgeFrame`, the datagram framing the
   firmware's ESP-NOW bridge and the EastMesh MQTT bridge share.
+
+### Changed
+
+- The router no longer excludes `PacketSourcePHY` when rebroadcasting, so a
+  packet heard on the radio is repeated on the radio like in the firmware. Other
+  transports still never get a packet echoed back.
+- `go.mod` requires Go 1.26 and `periph.io/x/{conn,devices,host}/v3` for the
+  PHY transport and the companion example. The `sx126x` driver is not part of a
+  periph release yet, so `go.mod` replaces `periph.io/x/devices/v3` with the
+  `sx126x` branch of the fork at `github.com/p2k/periph-devices`.
 
 ### Fixed
 

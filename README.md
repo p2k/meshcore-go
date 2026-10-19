@@ -8,7 +8,7 @@ This library provides Go packages for building MeshCore mesh networking applicat
 
 - **Core protocol** - Packet encoding/decoding, routing, crypto
 - **Device implementations** - Room server, repeater, companion node
-- **Transports** - Serial (RS232), MQTT
+- **Transports** - Serial (RS232), MQTT, UDP multicast, LoRa radio (PHY)
 
 ## Packages
 
@@ -43,6 +43,7 @@ Network transports:
 
 - **serial** - RS232 serial connection
 - **mqtt** - MQTT bridge for extending networks
+- **phy** - LoRa radio attached to the host, e.g. a SX1262 via periph.io
 
 ## Usage
 
@@ -67,6 +68,18 @@ The MQTT transport speaks to firmware forks that add MQTT bridging to MeshCore r
 | `mqtt.FramingRaw` | [vrybdpkt/MeshCore](https://github.com/vrybdpkt/MeshCore) | bare packet bytes | `meshcore/bridge` |
 
 For EastMesh, `Secret` is the repeater's `bridge.secret`. That firmware's bridge connects over plain TCP only, so the broker needs a non-TLS listener for the repeaters even if this side uses `UseTLS`.
+
+The PHY transport drives a SX126x LoRa radio attached to the host, e.g. a Raspberry Pi HAT or a USB-to-SPI stick, through `periph.io/x/devices/v3/sx126x`. It configures the radio, keeps an airtime budget like the firmware, and queues packets so sending never blocks:
+
+```go
+tr := phy.New(phy.Config{
+    Radio:     dev, // *sx126x.Dev, set up for your board
+    Configure: phy.ConfigureSX126x(dev),
+    Params:    phy.RadioParams{Frequency: 915000000, Bandwidth: 250000, SpreadingFactor: 11, CodingRate: 5, TxPower: 22},
+})
+```
+
+`go run ./examples/companion -phy meshstick` (or `-phy waveshare-hat`) runs a companion node on such a radio. Pay attention to the regulations of your region, e.g. frequencies, TX power and duty cycle (`DutyCycle`, `-duty-cycle`).
 
 ## Protocol
 

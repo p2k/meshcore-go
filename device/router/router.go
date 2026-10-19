@@ -709,6 +709,10 @@ func (r *Router) dispatchToApp(pkt *codec.Packet, src transport.PacketSource) {
 // broadcastToTransports sends a packet to all registered transports except the
 // one identified by excludeSource. This prevents echoing a packet back to the
 // transport it arrived on.
+//
+// A radio is never excluded: repeating over the air means sending on the radio
+// the packet arrived on, like the firmware with its single radio. The radio
+// doesn't hear its own transmissions, and dedup drops echoes from neighbors.
 func (r *Router) broadcastToTransports(pkt *codec.Packet, excludeSource transport.PacketSource) {
 	r.mu.RLock()
 	entries := make([]transportEntry, len(r.transports))
@@ -716,7 +720,7 @@ func (r *Router) broadcastToTransports(pkt *codec.Packet, excludeSource transpor
 	r.mu.RUnlock()
 
 	for _, entry := range entries {
-		if entry.source == excludeSource {
+		if entry.source == excludeSource && excludeSource != transport.PacketSourcePHY {
 			continue
 		}
 		if !entry.transport.IsConnected() {
