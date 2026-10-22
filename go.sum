@@ -20,8 +20,8 @@ github.com/mattn/go-colorable v0.1.15 h1:+u9SLTRGnXv73cEsnsmoZBom+dMU88B2M0aDcWy
 github.com/mattn/go-colorable v0.1.15/go.mod h1:6LmQG8QLFO4G5z1gPvYEzlUgJ2wF+stgPZH1UqBm1s8=
 github.com/mattn/go-isatty v0.0.22 h1:j8l17JJ9i6VGPUFUYoTUKPSgKe/83EYU2zBC7YNKMw4=
 github.com/mattn/go-isatty v0.0.22/go.mod h1:ZXfXG4SQHsB/w3ZeOYbR0PrPwLy+n6xiMrJlRFqopa4=
-github.com/p2k/periph-devices/v3 v3.0.0-20261019162239-1cec518f1fad h1:yEH9wghQJEuE8Oo4TNnVHWzuBeCYApEgeTdnKaQQ8SA=
-github.com/p2k/periph-devices/v3 v3.0.0-20261019162239-1cec518f1fad/go.mod h1:pLDGmWZY1CWMrV3Gvbdut+ZPMdZnvV23Jlj9NvZRPSI=
+github.com/p2k/periph-devices/v3 v3.0.0-20261022140114-ec5965a1df04 h1:Y8NHGQOTo0yNseKhgqCfkU3eR8yAZUfk9m5+ZUrn5Ok=
+github.com/p2k/periph-devices/v3 v3.0.0-20261022140114-ec5965a1df04/go.mod h1:pLDGmWZY1CWMrV3Gvbdut+ZPMdZnvV23Jlj9NvZRPSI=
 github.com/smartystreets/assertions v1.2.0 h1:42S6lae5dvLc7BrLu/0ugRtcFVjoJNMC/N3yZFZkDFs=
 github.com/smartystreets/assertions v1.2.0/go.mod h1:tcbTF8ujkAEcZ8TElKY+i30BzYlVhC/LOxJk7iOWnoo=
 github.com/stretchr/testify v1.12.1 h1:EuwCh5fleGS7H32xRwO3wRGT7DxrDhLAT6FF8MpWDWE=

@@ -109,6 +109,12 @@ contain breaking changes; those are called out explicitly below.
   straight back. Unknown or read-only keys return `cli.ErrUnknownKey`.
 - `codec.EncodeBridgeFrame` / `codec.DecodeBridgeFrame`, the datagram framing the
   firmware's ESP-NOW bridge and the EastMesh MQTT bridge share.
+- `CompanionConfig.NoInitialAdvert` skips the flood advert `CompanionNode.Run`
+  sends on start, matching the companion firmware, which doesn't advertise on
+  start. `examples/companion -no-initial-advert` sets it.
+- `companion.Config.SendSelfAdvert` sends this node's advert for
+  `CMD_SEND_SELF_ADVERT`, flooded or zero-hop as the app asks, like the firmware.
+  `examples/companion` wires it to the advert scheduler.
 
 ### Changed
 

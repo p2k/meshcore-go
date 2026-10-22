@@ -50,6 +50,13 @@ type CompanionConfig struct {
 	// (disabled), matching firmware. Set a non-zero value to opt in.
 	AdvertFloodInterval uint8
 
+	// NoInitialAdvert skips the flood advert Run sends on start. Default: false
+	// (advert sent). The companion_radio firmware doesn't advertise on start;
+	// set it to match, e.g. on a radio where each restart would flood the mesh.
+	// Periodic adverts (AdvertLocalInterval, AdvertFloodInterval) and adverts
+	// requested by the app are unaffected.
+	NoInitialAdvert bool
+
 	// ACKTimeout is how long to wait for an ACK before retrying. Default: 12s.
 	ACKTimeout time.Duration
 
@@ -87,6 +94,7 @@ type CompanionNode struct {
 	clk         *clock.Clock
 	log         *slog.Logger
 
+	initialAdvert  bool
 	keepAliveEvery time.Duration
 
 	pendingMu        sync.Mutex
@@ -189,6 +197,7 @@ func NewCompanion(cfg CompanionConfig) (*CompanionNode, error) {
 		}),
 		clk:              clk,
 		log:              logger.WithGroup("companion"),
+		initialAdvert:    !cfg.NoInitialAdvert,
 		keepAliveEvery:   keepAlive,
 		pendingLogins:    make(map[core.MeshCoreID]uint32),
 		pendingTelemetry: make(map[uint32]core.MeshCoreID),
@@ -219,8 +228,9 @@ func (n *CompanionNode) Run(ctx context.Context) error {
 	go n.connections.Start(ctx)
 	go n.keepAliveLoop(ctx)
 
-	// Send initial advert
-	n.advertSched.SendNow(true)
+	if n.initialAdvert {
+		n.advertSched.SendNow(true)
+	}
 
 	// Run advert scheduler (blocks until ctx cancelled)
 	n.advertSched.Start(ctx)

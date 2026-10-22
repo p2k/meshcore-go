@@ -68,6 +68,9 @@ type Radio interface {
 	Receive(ctx context.Context, handler func(sx126x.Packet)) error
 	// Transmit sends data and blocks until it has been sent or ctx is done.
 	Transmit(ctx context.Context, data []byte) error
+	// Reconfigure calls fn while the radio is neither receiving nor
+	// transmitting, pausing Receive meanwhile, and returns its error.
+	Reconfigure(ctx context.Context, fn func() error) error
 	// TimeOnAir returns the time it takes to transmit a packet with the given
 	// payload length.
 	TimeOnAir(payloadLength int) time.Duration
@@ -92,8 +95,8 @@ type Config struct {
 	// Radio is the LoRa radio.
 	Radio Radio
 	// Configure, if set, applies the radio parameters. It's called when the
-	// transport starts and by SetRadioParams, never while receiving or
-	// transmitting. Without it, the radio has to be configured by the caller
+	// transport starts and by SetRadioParams through Radio.Reconfigure, so never
+	// while receiving or transmitting. Without it, the radio has to be configured by the caller
 	// and the parameters can't be changed. ConfigureSX126x returns it for a
 	// SX126x.
 	Configure func(RadioParams) error
@@ -192,11 +195,6 @@ type Transport struct {
 	params    RadioParams
 	dutyCycle float64
 
-	// radioMu is held while transmitting or configuring the radio. pause asks
-	// the receive loop to pause receiving for configuring.
-	radioMu sync.Mutex
-	pause   chan pauseRequest
-
 	stats Stats // guarded by mu
 }
 
@@ -204,13 +202,6 @@ type Transport struct {
 type txEntry struct {
 	data      []byte
 	notBefore time.Time
-}
-
-// pauseRequest asks the receive loop to pause receiving. It closes paused when
-// it has and waits for resume to be closed.
-type pauseRequest struct {
-	paused chan struct{}
-	resume chan struct{}
 }
 
 // New creates a new phy transport with the given configuration.
@@ -238,7 +229,6 @@ func New(cfg Config) *Transport {
 		queued:    make(chan struct{}, 1),
 		params:    cfg.Params,
 		dutyCycle: cfg.DutyCycle,
-		pause:     make(chan pauseRequest),
 	}
 }
 
@@ -259,10 +249,7 @@ func (t *Transport) Start(ctx context.Context) error {
 		return errors.New("radio is required")
 	}
 	if t.cfg.Configure != nil {
-		t.radioMu.Lock()
-		err := t.cfg.Configure(t.RadioParams())
-		t.radioMu.Unlock()
-		if err != nil {
+		if err := t.cfg.Configure(t.RadioParams()); err != nil {
 			return fmt.Errorf("configuring radio: %w", err)
 		}
 	}
@@ -374,7 +361,10 @@ func (t *Transport) SetRadioParams(p RadioParams) error {
 		return errors.New("radio parameters can't be changed without Configure")
 	}
 	old := t.RadioParams()
-	err := t.withRadioPaused(func() error {
+	// The radio might have to finish receiving a packet first.
+	ctx, cancel := context.WithTimeout(context.Background(), t.cfg.Radio.TimeOnAir(maxPacketSize)+time.Second)
+	defer cancel()
+	err := t.cfg.Radio.Reconfigure(ctx, func() error {
 		err := t.cfg.Configure(p)
 		if err != nil {
 			if rerr := t.cfg.Configure(old); rerr != nil {
@@ -414,30 +404,6 @@ func (t *Transport) SetDutyCycle(dutyCycle float64) {
 	default:
 	}
 	t.logger().Info("duty cycle changed", "duty_cycle", dutyCycle)
-}
-
-// withRadioPaused calls fn while the radio is neither receiving nor
-// transmitting.
-func (t *Transport) withRadioPaused(fn func() error) error {
-	t.radioMu.Lock()
-	defer t.radioMu.Unlock()
-
-	t.mu.RLock()
-	done := t.done
-	t.mu.RUnlock()
-	if done == nil {
-		return fn() // not running
-	}
-
-	req := pauseRequest{paused: make(chan struct{}), resume: make(chan struct{})}
-	select {
-	case t.pause <- req:
-	case <-done:
-		return fn()
-	}
-	defer close(req.resume)
-	<-req.paused
-	return fn()
 }
 
 // SendPacket queues a MeshCore packet for transmission and returns without
@@ -491,37 +457,15 @@ func (t *Transport) txDelay(packet *codec.Packet, size int) time.Duration {
 	return rand.N(limit + 1)
 }
 
-// receiveLoop receives packets until ctx is done or the radio fails. It pauses
-// receiving on request.
+// receiveLoop receives packets until ctx is done or the radio fails.
 func (t *Transport) receiveLoop(ctx context.Context, cancel context.CancelFunc) {
-	for {
-		rctx, rcancel := context.WithCancel(ctx)
-		received := make(chan error, 1)
-		go func() {
-			received <- t.cfg.Radio.Receive(rctx, t.handleRx)
-		}()
-
-		select {
-		case err := <-received:
-			rcancel()
-			if ctx.Err() != nil {
-				return // context cancelled, clean shutdown
-			}
-			// The radio failed, stop sending too.
-			cancel()
-			t.handleDisconnect(err)
-			return
-		case req := <-t.pause:
-			rcancel()
-			<-received
-			close(req.paused)
-			select {
-			case <-req.resume:
-			case <-ctx.Done():
-				return
-			}
-		}
+	err := t.cfg.Radio.Receive(ctx, t.handleRx)
+	if ctx.Err() != nil {
+		return // context cancelled, clean shutdown
 	}
+	// The radio failed, stop sending too.
+	cancel()
+	t.handleDisconnect(err)
 }
 
 // handleRx parses a received packet and dispatches it.
@@ -587,13 +531,11 @@ func (t *Transport) sendLoop(ctx context.Context) {
 			continue
 		}
 
-		t.radioMu.Lock()
 		toa := t.cfg.Radio.TimeOnAir(len(data))
 		// The radio might have to finish receiving a packet first.
 		tctx, cancel := context.WithTimeout(ctx, toa*3/2+t.cfg.Radio.TimeOnAir(maxPacketSize)+time.Second)
 		err := t.cfg.Radio.Transmit(tctx, data)
 		cancel()
-		t.radioMu.Unlock()
 		if ctx.Err() != nil {
 			return
 		}

@@ -31,4 +31,4 @@ require (
 // merged and released (https://github.com/p2k/periph-devices/tree/sx126x).
 // Update with:
 //   go mod edit -replace=periph.io/x/devices/v3=github.com/p2k/periph-devices/v3@sx126x && go mod tidy
-replace periph.io/x/devices/v3 => github.com/p2k/periph-devices/v3 v3.0.0-20261019162239-1cec518f1fad
+replace periph.io/x/devices/v3 => github.com/p2k/periph-devices/v3 v3.0.0-20261022140114-ec5965a1df04

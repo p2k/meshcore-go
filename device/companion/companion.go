@@ -155,6 +155,16 @@ type Config struct {
 	// parameters are only stored and reported back.
 	OnTuningParams func(rxDelay, airtimeFactor uint32) error
 
+	// SendSelfAdvert, if set, sends this node's advert for CMD_SEND_SELF_ADVERT:
+	// flooded if the app asks for it, otherwise zero-hop. Without it,
+	// CMD_SEND_SELF_ADVERT returns an error. For a CompanionNode:
+	//
+	//	func(flood bool) error {
+	//		comp.AdvertScheduler().SendNow(flood)
+	//		return nil
+	//	}
+	SendSelfAdvert func(flood bool) error
+
 	// Stats, if set, provides device statistics for GET_STATS (the app polls
 	// this). Without it, GET_STATS still answers with battery and uptime, and
 	// zeroed packet/radio counters.
@@ -199,6 +209,7 @@ type Server struct {
 	sendStatus    func(ctx context.Context, to core.MeshCoreID) error
 	sendTelemetry func(ctx context.Context, to core.MeshCoreID) (uint32, error)
 	sendTrace     func(ctx context.Context, tag, authCode uint32, flags uint8, path []byte) error
+	sendAdvert    func(flood bool) error
 	stats         func() Stats
 	exportSelf    func() []byte
 	startTime     time.Time
@@ -308,6 +319,7 @@ func NewServer(cfg Config) *Server {
 		sendStatus:    cfg.SendStatus,
 		sendTelemetry: cfg.SendTelemetry,
 		sendTrace:     cfg.SendTrace,
+		sendAdvert:    cfg.SendSelfAdvert,
 		stats:         cfg.Stats,
 		exportSelf:    cfg.ExportSelf,
 
@@ -547,8 +559,7 @@ func (s *Server) dispatch(ss *session, payload []byte) error {
 		return ss.send(serial.EncodeOK())
 
 	case serial.CmdSendSelfAdvert:
-		// The node's own scheduler advertises on its interval; acknowledge.
-		return ss.send(serial.EncodeOK())
+		return s.sendSelfAdvert(ss, payload)
 
 	case serial.CmdSetAdvertLatLon, serial.CmdSetOtherParams,
 		serial.CmdSetFloodScopeKey, serial.CmdSetDefaultFloodScope:
@@ -1153,6 +1164,21 @@ func (s *Server) getContactByKey(ss *session, payload []byte) error {
 		return ss.send(serial.EncodeErr(serial.ErrCodeNotFound))
 	}
 	return ss.send(contactToWire(ct).Encode())
+}
+
+// sendSelfAdvert handles CMD_SEND_SELF_ADVERT. Like the firmware, an optional
+// parameter byte of 1 after the command floods the advert, otherwise it's sent
+// zero-hop.
+func (s *Server) sendSelfAdvert(ss *session, payload []byte) error {
+	if s.sendAdvert == nil {
+		return ss.send(serial.EncodeErr(serial.ErrCodeUnsupportedCmd))
+	}
+	flood := len(payload) >= 2 && payload[1] == 1
+	if err := s.sendAdvert(flood); err != nil {
+		s.log.Warn("failed to send self advert", "flood", flood, "error", err)
+		return ss.send(serial.EncodeErr(serial.ErrCodeTableFull))
+	}
+	return ss.send(serial.EncodeOK())
 }
 
 // setRadioParams handles CMD_SET_RADIO_PARAMS, validating and storing the radio

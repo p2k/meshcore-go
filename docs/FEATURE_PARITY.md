@@ -123,13 +123,14 @@ auto-ACK piggyback and multi-acks.
 
 **Divergences:**
 - Go defaults `MaxContacts` to 32 (firmware 100), plus 8 anon slots, so 40 total.
-- `CMD_SEND_SELF_ADVERT` returns OK without actually sending an advert
-  (`device/companion/companion.go`). Recurring adverts correctly default to disabled
-  to match firmware, so a companion currently has no working way to advertise on
-  demand through the frame protocol.
-- `CompanionNode.Run` sends a flood advert on every start, while the companion
-  firmware only advertises when the user asks. Over a PHY transport that is a
-  mesh-wide flood per restart.
+- `CMD_SEND_SELF_ADVERT` sends the advert through the `companion.Config.SendSelfAdvert`
+  callback (2026-10-22), flooded or zero-hop like firmware; without the callback it
+  returns `ERR_CODE_UNSUPPORTED_CMD`. Unlike firmware, the flooded advert is not scoped
+  with the default flood scope, as `advert.Scheduler.SendNow` floods unscoped.
+- `CompanionNode.Run` sends a flood advert on every start by default, while the
+  companion firmware only advertises when the user asks. Over a PHY transport that
+  is a mesh-wide flood per restart; `CompanionConfig.NoInitialAdvert` (2026-10-22)
+  skips it. The default is kept to avoid a breaking change.
 
 ### Frame protocol server (`device/companion`)
 

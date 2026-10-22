@@ -65,6 +65,8 @@ func run() error {
 		name    = flag.String("name", "meshcore-go", "node advertised name")
 		keyPath = flag.String("key", "companion.key", "path to the node key file (created if missing)")
 
+		noInitialAdvert = flag.Bool("no-initial-advert", false, "don't send a flood advert on start, like the companion firmware")
+
 		serialPort = flag.String("serial", "", "serial port for the LoRa radio (optional, e.g. /dev/ttyUSB0)")
 		baud       = flag.Int("baud", 115200, "serial baud rate")
 		mqttBroker = flag.String("mqtt", "", "MQTT bridge broker URL (optional, e.g. tcp://host:1883)")
@@ -145,10 +147,11 @@ func run() error {
 	}
 
 	comp, err := node.NewCompanion(node.CompanionConfig{
-		PrivateKey: priv,
-		Transports: transports,
-		Name:       *name,
-		Logger:     slog.Default(),
+		PrivateKey:      priv,
+		Transports:      transports,
+		Name:            *name,
+		NoInitialAdvert: *noInitialAdvert,
+		Logger:          slog.Default(),
 	})
 	if err != nil {
 		slog.Error("Failed to create companion node", "error", err)
@@ -200,6 +203,10 @@ func run() error {
 		},
 		SendTrace: func(_ context.Context, tag, authCode uint32, flags uint8, path []byte) error {
 			return comp.SendTrace(tag, authCode, flags, path)
+		},
+		SendSelfAdvert: func(flood bool) error {
+			comp.AdvertScheduler().SendNow(flood)
+			return nil
 		},
 		ExportSelf: func() []byte {
 			builder := advert.NewSelfAdvertBuilder(&advert.SelfAdvertConfig{
